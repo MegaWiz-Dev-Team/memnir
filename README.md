@@ -8,15 +8,29 @@ Claude Code stores memory per-project under `~/.claude/projects/<encoded-path>/m
 
 ## Architecture
 
-```
-every project, every machine ──symlink──► ~/.claude/memnir/   (canonical store)
-                                                │
-              SessionStart hook                 │            Stop hook
-              memnir start ───────────────┴───────────────── memnir push (async)
-              (autolink current project + sync)              (propagate new memory)
-                                                │
-                              rsync -auz over Tailscale
-                       only `scope: shared` files · newest-wins · never deletes
+```mermaid
+flowchart LR
+  subgraph MA["💻 Machine A"]
+    direction TB
+    pA["every project<br/>projects/*/memory"]
+    sA[("~/.claude/memnir<br/>canonical store")]
+    hA1["SessionStart hook<br/>memnir start — autolink + sync"]
+    hA2["Stop hook<br/>memnir push · async"]
+    pA -- symlink --> sA
+    hA1 --> sA
+    sA --> hA2
+  end
+  subgraph MB["🖥️ Machine B"]
+    direction TB
+    pB["every project<br/>projects/*/memory"]
+    sB[("~/.claude/memnir<br/>canonical store")]
+    hB1["SessionStart hook<br/>memnir start"]
+    hB2["Stop hook<br/>memnir push"]
+    pB -- symlink --> sB
+    hB1 --> sB
+    sB --> hB2
+  end
+  sA <== "rsync -auz · Tailscale<br/>only scope: shared<br/>newest-wins · never deletes" ==> sB
 ```
 
 1. **Store** — `~/.claude/memnir/`, the single place real memory files live on each machine.

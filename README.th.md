@@ -8,15 +8,29 @@ Claude Code เก็บ memory แยกตาม project ที่ `~/.claude/
 
 ## สถาปัตยกรรม
 
-```
-ทุก project ทุกเครื่อง ──symlink──► ~/.claude/memnir/   (canonical store)
-                                          │
-              SessionStart hook           │            Stop hook
-              memnir start ──────────┴──────────────── memnir push (async)
-              (autolink + sync)                        (ส่ง memory ที่เพิ่งเขียน)
-                                          │
-                            rsync -auz over Tailscale
-                     เฉพาะ `scope: shared` · newest-wins · ไม่ลบ
+```mermaid
+flowchart LR
+  subgraph MA["💻 เครื่อง A"]
+    direction TB
+    pA["ทุก project<br/>projects/*/memory"]
+    sA[("~/.claude/memnir<br/>canonical store")]
+    hA1["SessionStart hook<br/>memnir start — autolink + sync"]
+    hA2["Stop hook<br/>memnir push · async"]
+    pA -- symlink --> sA
+    hA1 --> sA
+    sA --> hA2
+  end
+  subgraph MB["🖥️ เครื่อง B"]
+    direction TB
+    pB["ทุก project<br/>projects/*/memory"]
+    sB[("~/.claude/memnir<br/>canonical store")]
+    hB1["SessionStart hook<br/>memnir start"]
+    hB2["Stop hook<br/>memnir push"]
+    pB -- symlink --> sB
+    hB1 --> sB
+    sB --> hB2
+  end
+  sA <== "rsync -auz · Tailscale<br/>เฉพาะ scope: shared<br/>newest-wins · ไม่ลบ" ==> sB
 ```
 
 1. **Store** — `~/.claude/memnir/` ไฟล์จริงอยู่ที่เดียวต่อเครื่อง
