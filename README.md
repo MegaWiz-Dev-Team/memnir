@@ -1,4 +1,4 @@
-# Memnir 🐦‍⬛
+# <img src="logo.svg" width="30" alt=""> Memnir
 
 *memory + [Mímir](https://en.wikipedia.org/wiki/M%C3%ADmir)* — share [Claude Code](https://docs.claude.com/en/docs/claude-code) memory **across machines** and **across every session**, peer-to-peer over [Tailscale](https://tailscale.com). No cloud.
 

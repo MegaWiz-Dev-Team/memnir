@@ -1,4 +1,4 @@
-# Memnir 🐦‍⬛
+# <img src="logo.svg" width="30" alt=""> Memnir
 
 *memory + [Mímir](https://en.wikipedia.org/wiki/M%C3%ADmir)* — share memory ของ [Claude Code](https://docs.claude.com/en/docs/claude-code) ข้าม **เครื่อง** และ **ทุก session** แบบ peer-to-peer ผ่าน [Tailscale](https://tailscale.com) ไม่ผ่าน cloud
 

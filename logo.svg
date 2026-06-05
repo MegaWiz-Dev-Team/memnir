@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Memnir — Mímir's Well">
+  <title>Memnir — Mímir's Well</title>
+  <!-- falling drop (a new memory into the well of wisdom) -->
+  <path d="M32 5 q4.5 7.5 4.5 12 a4.5 4.5 0 1 1 -9 0 Q27.5 12.5 32 5 z" fill="#0f766e"/>
+  <!-- ripples (well seen from above) -->
+  <circle cx="32" cy="37" r="24" fill="none" stroke="#14b8a6" stroke-width="3.5"/>
+  <circle cx="32" cy="37" r="16" fill="none" stroke="#2dd4a7" stroke-width="2.5" opacity="0.9"/>
+  <circle cx="32" cy="37" r="8.5" fill="none" stroke="#5eead4" stroke-width="2.5"/>
+  <circle cx="32" cy="37" r="3" fill="#0f766e"/>
+</svg>
