@@ -1,0 +1,14 @@
+[package]
+name = "memnir"
+version = "0.1.0"
+edition = "2021"
+description = "Shared Claude memory across machines + sessions over Tailscale (scope-filtered sync, doctor, dashboard)"
+
+[[bin]]
+name = "memnir"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
