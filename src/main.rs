@@ -393,7 +393,7 @@ fn jstr(s: &str) -> String {
 }
 fn cmd_dash() {
     let a = analyze();
-    let color = |t: &str| match t { "project" => "#4f8cff", "reference" => "#34c759", "feedback" => "#ff9f0a", _ => "#888888" };
+    let color = |t: &str| match t { "project" => "#14b8a6", "reference" => "#22c55e", "feedback" => "#f59e0b", _ => "#94a3b8" };
     let mut nodes = String::from("[");
     for (i, m) in a.mems.iter().enumerate() {
         if i > 0 { nodes.push(','); }
@@ -401,7 +401,7 @@ fn cmd_dash() {
         nodes.push_str(&format!(
             "{{\"id\":{},\"label\":{},\"group\":{},\"value\":{},\"shape\":\"dot\",\"color\":{{\"background\":{},\"border\":{}}},\"title\":{}}}",
             jstr(&m.file), jstr(&label), jstr(&m.typ), m.tok, jstr(color(&m.typ)),
-            jstr(if m.shared { "#1a1a2e" } else { "#ff3b30" }),
+            jstr(if m.shared { "#0f766e" } else { "#e11d48" }),
             jstr(&format!("{}  ~{}tok  {}", m.file, m.tok, if m.shared {"shared"} else {"local"}))
         ));
     }
@@ -450,22 +450,22 @@ const HTML: &str = r###"<!doctype html><html><head><meta charset=utf-8>
 <title>Memnir Dashboard</title>
 <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 <style>
- body{margin:0;background:#0f1020;color:#e6e6f0;font:14px -apple-system,system-ui,sans-serif}
- header{padding:14px 20px;border-bottom:1px solid #26284a;display:flex;gap:16px;align-items:center}
+ body{margin:0;background:#f4faf7;color:#16322b;font:14px -apple-system,system-ui,sans-serif}
+ header{padding:14px 20px;border-bottom:1px solid #d3ece1;display:flex;gap:16px;align-items:center;background:#ffffff}
  h1{font-size:18px;margin:0}
  .cards{display:flex;gap:12px;flex-wrap:wrap;padding:16px 20px}
- .card{background:#1a1b35;border:1px solid #26284a;border-radius:12px;padding:14px 16px;min-width:140px}
- .card .v{font-size:24px;font-weight:700} .card .l{color:#9a9ac0;font-size:12px}
- .warn{color:#ff453a}.ok{color:#34c759}
- .bar{height:9px;border-radius:5px;background:#26284a;overflow:hidden;margin-top:6px}
+ .card{background:#ffffff;border:1px solid #d3ece1;border-radius:12px;padding:14px 16px;min-width:140px;box-shadow:0 1px 3px rgba(20,184,166,.06)}
+ .card .v{font-size:24px;font-weight:700;color:#0f766e} .card .l{color:#6b8c80;font-size:12px}
+ .warn{color:#e11d48 !important}.ok{color:#10b981 !important}
+ .bar{height:9px;border-radius:5px;background:#e6f4ee;overflow:hidden;margin-top:6px}
  .bar>span{display:block;height:100%}
  .wrap{display:flex;gap:16px;padding:0 20px 20px;flex-wrap:wrap}
- .panel{background:#13142a;border:1px solid #26284a;border-radius:12px;padding:14px}
+ .panel{background:#ffffff;border:1px solid #d3ece1;border-radius:12px;padding:14px}
  #graph{flex:1;min-width:520px;height:560px}
  .side{width:300px} .row{display:flex;justify-content:space-between;margin:4px 0;font-size:13px}
  .legend span{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px}
 </style></head><body>
-<header><h1>🐦‍⬛ Memnir Dashboard</h1><span id=sub class=l></span></header>
+<header><h1>🐦‍⬛ Memnir Dashboard</h1><span id=sub class=l style="color:#6b8c80"></span></header>
 <div class=cards id=cards></div>
 <div class=wrap>
  <div class="panel" id=graph></div>
@@ -473,9 +473,9 @@ const HTML: &str = r###"<!doctype html><html><head><meta charset=utf-8>
    <b>Types</b><div id=types></div>
    <b>Top token footprint</b><div id=top></div>
    <div class=legend style="margin-top:10px">
-     <span style="background:#4f8cff"></span>project
-     <span style="background:#34c759"></span>reference
-     <span style="background:#ff9f0a"></span>feedback &nbsp; <span style="background:#ff3b30"></span>=local border
+     <span style="background:#14b8a6"></span>project
+     <span style="background:#22c55e"></span>reference
+     <span style="background:#f59e0b"></span>feedback &nbsp; <span style="background:#e11d48"></span>=local border
    </div>
  </div>
 </div>
@@ -486,21 +486,21 @@ $('#sub').textContent=`${D.n} memories · shared ${D.shared}/${D.n} · ${D.edges
 const idxK=(D.idx_tok/1000).toFixed(1), warn=D.idx_tok>12000;
 $('#cards').innerHTML=`
  <div class=card><div class="v ${warn?'warn':'ok'}">${idxK}k</div><div class=l>index tok / session ${warn?'🔴':'🟢'}</div>
-   <div class=bar><span style="width:${Math.min(100,D.idx_tok/200)}%;background:${warn?'#ff453a':'#34c759'}"></span></div></div>
+   <div class=bar><span style="width:${Math.min(100,D.idx_tok/200)}%;background:${warn?'#e11d48':'#10b981'}"></span></div></div>
  <div class=card><div class=v>${(D.pool_tok/1000)|0}k</div><div class=l>pool total tok</div></div>
- <div class=card><div class=v>${D.shared}<span style="color:#9a9ac0">/${D.n}</span></div><div class=l>shared / total</div></div>
+ <div class=card><div class=v>${D.shared}<span style="color:#6b8c80">/${D.n}</span></div><div class=l>shared / total</div></div>
  <div class=card><div class="v ${D.broken?'warn':'ok'}">${D.broken}</div><div class=l>broken links</div></div>
  <div class=card><div class=v>${D.isolated}</div><div class=l>isolated nodes</div></div>`;
 const mx=Math.max(...Object.values(D.types));
 $('#types').innerHTML=Object.entries(D.types).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
- `<div class=row><span>${k}</span><span>${v}</span></div><div class=bar><span style="width:${v/mx*100}%;background:#4f8cff"></span></div>`).join('');
+ `<div class=row><span>${k}</span><span>${v}</span></div><div class=bar><span style="width:${v/mx*100}%;background:#14b8a6"></span></div>`).join('');
 const tmx=Math.max(...D.top.map(t=>t[1]));
 $('#top').innerHTML=D.top.map(([f,t])=>
  `<div class=row><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px">${f}</span><span>${t}</span></div>
-  <div class=bar><span style="width:${t/tmx*100}%;background:#ff9f0a"></span></div>`).join('');
+  <div class=bar><span style="width:${t/tmx*100}%;background:#2dd4a7"></span></div>`).join('');
 new vis.Network($('#graph'),{nodes:new vis.DataSet(D.nodes),edges:new vis.DataSet(D.edges)},{
- nodes:{scaling:{min:6,max:34},font:{color:'#cfcfe8',size:11}},
- edges:{color:{color:'#3a3c66',highlight:'#4f8cff'},smooth:false,width:0.5},
+ nodes:{scaling:{min:6,max:34},font:{color:'#16322b',size:11}},
+ edges:{color:{color:'#bfe6d8',highlight:'#14b8a6'},smooth:false,width:0.5},
  physics:{barnesHut:{gravitationalConstant:-8000,springLength:120},stabilization:{iterations:180}},
  interaction:{hover:true,tooltipDelay:80}});
 </script></body></html>"###;
