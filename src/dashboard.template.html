@@ -33,6 +33,7 @@
  <div class="panel" id=graph></div>
  <div class="panel side">
    <b>Types</b><div id=types></div>
+   <b>Origins</b><div id=origins></div>
    <b>Top token footprint</b><div id=top></div>
    <div class=legend style="margin-top:10px">
      <span style="background:#14b8a6"></span>project
@@ -58,6 +59,9 @@ $('#cards').innerHTML=`
 const mx=Math.max(...Object.values(D.types));
 $('#types').innerHTML=Object.entries(D.types).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
  `<div class=row><span>${k}</span><span>${v}</span></div><div class=bar><span style="width:${v/mx*100}%;background:#14b8a6"></span></div>`).join('');
+const omx=Math.max(1,...Object.values(D.origins||{}));
+$('#origins').innerHTML=Object.entries(D.origins||{}).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
+ `<div class=row><span>${k}</span><span>${v}</span></div><div class=bar><span style="width:${v/omx*100}%;background:#0f766e"></span></div>`).join('');
 const tmx=Math.max(...D.top.map(t=>t[1]));
 $('#top').innerHTML=D.top.map(([f,t])=>
  `<div class=row><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px">${f}</span><span>${t}</span></div>

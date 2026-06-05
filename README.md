@@ -51,16 +51,21 @@ cd memnir
 
 > No `cargo` on a machine but same arch (Apple Silicon)? Build once and copy the binary: `scp target/release/memnir other-mac:.local/bin/`. `install.sh` falls back to a prebuilt binary if `cargo` is missing.
 
-### Configure the peer
+### Configure peers (mesh)
 
-Each machine needs to know its peer (the *other* machine). Set it once — either an env var or a one-line config file:
+Each machine lists **every other machine** — one `user@tailscale-host` per line. For 2 machines that's a single line each; for N machines it's a full mesh.
 
 ```bash
-echo 'you@other-mac' > ~/.claude/memnir.conf      # user@tailscale-host of the other machine
-# or:  export MEMNIR_PEER=you@other-mac
+# on machine A — list B and C:
+printf '%s\n' 'you@mac-b' 'you@mac-c' > ~/.claude/memnir.conf
+# or:  export MEMNIR_PEER="you@mac-b,you@mac-c"
 ```
 
-No host data is baked into the binary.
+`push`/`pull` fan out to every peer (newest-wins, never deletes). No host data is baked into the binary. Each pair needs SSH key auth + Remote Login in both directions.
+
+### Origin tracking
+
+Each memory carries `metadata.origin: <hostname>` — the machine that first wrote it. Memnir stamps new memories before they push; pre-existing ones are grandfathered as `?` (unknown). See where memory comes from in `memnir status` / `doctor` (an `origins:` breakdown), in `memnir list` (origin shown per shared memory), and in the dashboard's **Origins** panel + each node's tooltip (`· from <machine>`).
 
 ## Usage
 

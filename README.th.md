@@ -51,16 +51,20 @@ cd memnir
 
 > ไม่มี cargo แต่ arch เดียวกัน (Apple Silicon)? build ที่เครื่องหนึ่งแล้ว `scp target/release/memnir อีกเครื่อง:.local/bin/`
 
-### ตั้งค่า peer
+### ตั้งค่า peers (mesh)
 
-แต่ละเครื่องต้องรู้ peer (อีกเครื่อง) ตั้งครั้งเดียว:
+แต่ละเครื่องลิสต์ **เครื่องอื่นทั้งหมด** — บรรทัดละ `user@tailscale-host` (2 เครื่อง = บรรทัดเดียว, N เครื่อง = mesh เต็ม):
 
 ```bash
-echo 'you@other-mac' > ~/.claude/memnir.conf      # user@tailscale-host ของอีกเครื่อง
-# หรือ:  export MEMNIR_PEER=you@other-mac
+printf '%s\n' 'you@mac-b' 'you@mac-c' > ~/.claude/memnir.conf
+# หรือ:  export MEMNIR_PEER="you@mac-b,you@mac-c"
 ```
 
-ไม่มี hostname ฝังใน binary
+`push`/`pull` วิ่งทุก peer (newest-wins, ไม่ลบ) · ไม่มี hostname ฝังใน binary · แต่ละคู่ต้องมี SSH key + Remote Login สองทิศ
+
+### Origin tracking (memory มาจากเครื่องไหน)
+
+memory แต่ละก้อนมี `metadata.origin: <hostname>` = เครื่องที่เขียนมันก้อนแรก Memnir stamp ตอนเขียนใหม่ก่อน push (ของเดิม grandfather เป็น `?`) ดูได้ที่ `memnir status`/`doctor` (บรรทัด `origins:`), `memnir list` (โชว์ origin ต่อ shared memory), และ dashboard panel **Origins** + tooltip ของ node (`· from <เครื่อง>`)
 
 ## วิธีใช้
 

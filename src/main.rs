@@ -1,6 +1,7 @@
 // Memnir — shared Claude memory across machines + sessions over Tailscale.
 // Single binary, pure std. Shells out to system rsync/ssh (no reinvention).
 // Only memories tagged `metadata.scope: shared` sync; everything else is local.
+// Peers form a mesh: each machine lists every other in ~/.claude/memnir.conf.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -13,6 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SSH_E: &str = "ssh -o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=accept-new";
 const SSH_ARGS: [&str; 6] = ["-o", "ConnectTimeout=8", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"];
+const REMOTE_SHARED_LS: &str = "cd ~/.claude/memnir && grep -lE '^[[:space:]]*scope:[[:space:]]*shared[[:space:]]*$' -- *.md 2>/dev/null";
 const IDX_WARN: usize = 12_000; // always-on index tokens before it's flagged
 const OVERSIZE: usize = 2_000; // a single memory above this is flagged for splitting
 const TOP_N: usize = 12; // dashboard "top token footprint" rows
@@ -31,26 +33,19 @@ fn hostname() -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
 }
-// peer = `user@host` of the other machine. Configured per-machine so no personal
-// data is baked into the binary: env MEMNIR_PEER, else first line of ~/.claude/memnir.conf.
-fn peer() -> String {
+// All peers (the other machines). Mesh: every machine lists every other one.
+// env MEMNIR_PEER (comma/space/newline separated) overrides; else every
+// non-comment line of ~/.claude/memnir.conf.
+fn peers() -> Vec<String> {
     if let Ok(p) = std::env::var("MEMNIR_PEER") {
-        let p = p.trim().to_string();
-        if !p.is_empty() { return p; }
+        let v: Vec<String> = p.split([',', ' ', '\n', '\t']).map(str::trim)
+            .filter(|s| !s.is_empty()).map(String::from).collect();
+        if !v.is_empty() { return v; }
     }
-    fs::read_to_string(PathBuf::from(home()).join(".claude/memnir.conf")).ok()
-        .and_then(|s| s.lines().map(|l| l.trim().to_string())
-            .find(|l| !l.is_empty() && !l.starts_with('#')))
+    fs::read_to_string(PathBuf::from(home()).join(".claude/memnir.conf"))
+        .map(|s| s.lines().map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from).collect())
         .unwrap_or_default()
-}
-fn require_peer() -> Option<String> {
-    let p = peer();
-    if p.is_empty() {
-        eprintln!("memnir: peer not configured — set env MEMNIR_PEER or write `user@host` to ~/.claude/memnir.conf");
-        None
-    } else {
-        Some(p)
-    }
 }
 fn now_stamp() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
@@ -67,10 +62,7 @@ fn fm_field(fm: &str, key: &str) -> Option<String> {
     })
 }
 fn has_scope_shared(fm: &str) -> bool {
-    fm.lines().any(|l| {
-        let t = l.trim();
-        t.strip_prefix("scope:").map(|v| v.trim() == "shared").unwrap_or(false)
-    })
+    fm.lines().any(|l| l.trim().strip_prefix("scope:").map(|v| v.trim() == "shared").unwrap_or(false))
 }
 fn extract_links(t: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -89,28 +81,46 @@ fn extract_links(t: &str) -> Vec<String> {
     out
 }
 fn norm(s: &str) -> String {
-    s.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect()
+    s.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect()
 }
-// Set/clear the `scope: shared` frontmatter line. Pure: returns the new file
-// content, or None when there is no frontmatter block.
-fn set_scope_in(content: &str, shared: bool) -> Option<String> {
+// Insert a frontmatter line after the last `type:`/`scope:` line (matching its
+// indent), else append. Skips if `key:` already present. Pure → unit-tested.
+fn insert_fm_line(content: &str, key: &str, value: &str) -> Option<String> {
     let rest = content.strip_prefix("---\n")?;
     let end = rest.find("\n---")?;
     let (fm, tail) = (&rest[..end], &rest[end..]); // tail starts with "\n---"
-    let mut lines: Vec<String> = fm.lines().map(str::to_string).collect();
-    lines.retain(|l| l.trim_start().split(':').next().map(str::trim) != Some("scope"));
-    if shared {
-        // insert after the `type:` line, matching its indent; else append
-        let anchor = lines.iter().enumerate().find(|(_, l)| l.trim_start().starts_with("type:"));
-        let (idx, indent) = match anchor {
-            Some((i, l)) => (i + 1, l[..l.len() - l.trim_start().len()].to_string()),
-            None => (lines.len(), "  ".to_string()),
-        };
-        lines.insert(idx, format!("{}scope: shared", indent));
+    if fm.lines().any(|l| l.trim_start().starts_with(&format!("{}:", key))) {
+        return None;
     }
+    let mut lines: Vec<String> = fm.lines().map(str::to_string).collect();
+    let anchor = lines.iter().enumerate().rev()
+        .find(|(_, l)| { let t = l.trim_start(); t.starts_with("type:") || t.starts_with("scope:") });
+    let (idx, indent) = match anchor {
+        Some((i, l)) => (i + 1, l[..l.len() - l.trim_start().len()].to_string()),
+        None => (lines.len(), "  ".to_string()),
+    };
+    lines.insert(idx, format!("{}{}: {}", indent, key, value));
     Some(format!("---\n{}{}", lines.join("\n"), tail))
 }
-// Pull the `<file>.md` out of a MEMORY.md index line `- [Title](<file>.md) — ...`.
+// Set/clear the `scope: shared` line. Pure: returns new content, None if no frontmatter.
+fn set_scope_in(content: &str, shared: bool) -> Option<String> {
+    let rest = content.strip_prefix("---\n")?;
+    let end = rest.find("\n---")?;
+    let (fm, tail) = (&rest[..end], &rest[end..]);
+    let mut lines: Vec<String> = fm.lines().map(str::to_string).collect();
+    let had = lines.len();
+    lines.retain(|l| l.trim_start().split(':').next().map(str::trim) != Some("scope"));
+    if !shared {
+        return Some(format!("---\n{}{}", lines.join("\n"), tail));
+    }
+    let _ = had;
+    let joined = format!("---\n{}{}", lines.join("\n"), tail);
+    insert_fm_line(&joined, "scope", "shared").or(Some(joined))
+}
+fn set_origin_in(content: &str, host: &str) -> Option<String> {
+    insert_fm_line(content, "origin", host)
+}
+// Pull `<file>.md` out of a MEMORY.md index line `- [Title](<file>.md) — ...`.
 fn index_file_of(line: &str) -> Option<&str> {
     let s = line.find("](")? + 2;
     let e = line[s..].find(".md)")? + 3;
@@ -146,6 +156,11 @@ fn jstr(s: &str) -> String {
     o.push('"');
     o
 }
+fn fmt_counts(m: &BTreeMap<String, usize>) -> String {
+    let mut v: Vec<_> = m.iter().collect();
+    v.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
+    v.iter().map(|(k, c)| format!("{}:{}", k, c)).collect::<Vec<_>>().join("  ")
+}
 
 // ---------- model / load ----------
 struct Mem {
@@ -153,6 +168,7 @@ struct Mem {
     name: String,
     typ: String,
     desc: String,
+    origin: String,
     shared: bool,
     tok: usize,
     links: Vec<String>,
@@ -176,6 +192,7 @@ fn load() -> Vec<Mem> {
             name: fm_field(fm, "name").unwrap_or_else(|| file.trim_end_matches(".md").to_string()),
             typ: fm_field(fm, "type").unwrap_or_else(|| "?".into()),
             desc: fm_field(fm, "description").unwrap_or_default(),
+            origin: fm_field(fm, "origin").unwrap_or_else(|| "?".into()),
             shared: has_scope_shared(fm),
             tok: t.chars().count() / 4,
             links: extract_links(&t),
@@ -189,6 +206,33 @@ fn shared_files() -> Vec<String> {
 fn resolve(id: &str) -> PathBuf {
     let base = Path::new(id).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     sm().join(format!("{}.md", base.trim_end_matches(".md")))
+}
+
+// ---------- origin stamping ----------
+// Stamp each memory created on THIS machine with `metadata.origin: <hostname>`.
+// A per-machine baseline grandfathers everything present at first run as "?"
+// (we genuinely don't know where pre-existing memories came from); only memories
+// that appear later — i.e. newly written here — get a real origin, before they push.
+fn stamp_origins() {
+    let host = hostname();
+    if host.is_empty() { return; }
+    let base = sm().join(".origin_baseline");
+    let known: HashSet<String> = fs::read_to_string(&base)
+        .map(|s| s.lines().map(String::from).collect()).unwrap_or_default();
+    let current = md_files();
+    if known.is_empty() {
+        let names: Vec<String> = current.iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).collect();
+        let _ = fs::write(&base, names.join("\n"));
+        return;
+    }
+    for p in current {
+        let Some(fname) = p.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+        if known.contains(&fname) { continue; }
+        let Ok(content) = fs::read_to_string(&p) else { continue };
+        if fm_field(frontmatter(&content), "origin").is_some() { continue; }
+        if let Some(new) = set_origin_in(&content, &host) { let _ = fs::write(&p, new); }
+    }
 }
 
 // ---------- index ----------
@@ -219,8 +263,8 @@ fn set_scope(file: &Path, shared: bool) {
         None => eprintln!("no frontmatter: {}", file.display()),
     }
 }
-// resolve → set scope → regen index → push (when shared). Single source of truth
-// for share/local/toggle. Ok(true) = pushed to peer.
+// resolve → set scope → regen index → push (when shared). Single source of
+// truth for share/local/toggle. Ok(true) = pushed to peers.
 fn apply_scope(id: &str, shared: bool) -> Result<bool, String> {
     let f = resolve(id);
     if !f.exists() {
@@ -244,21 +288,27 @@ fn rsync_files_from(list: &str, src: &str, dest: &str) {
     child.wait().ok();
 }
 fn push() {
-    let Some(p) = require_peer() else { return };
-    rsync_files_from(&shared_files().join("\n"), &format!("{}/", sm().display()), &format!("{}:.claude/memnir/", p));
+    stamp_origins();
+    let ps = peers();
+    if ps.is_empty() { eprintln!("memnir: no peers configured (~/.claude/memnir.conf)"); return; }
+    let list = shared_files().join("\n");
+    let src = format!("{}/", sm().display());
+    for p in ps {
+        rsync_files_from(&list, &src, &format!("{}:.claude/memnir/", p));
+    }
 }
 fn pull() {
-    let Some(p) = require_peer() else { return };
-    let out = Command::new("ssh").args(SSH_ARGS).arg(&p)
-        .arg("cd ~/.claude/memnir && grep -lE '^[[:space:]]*scope:[[:space:]]*shared[[:space:]]*$' -- *.md 2>/dev/null")
-        .output();
-    let rlist = out.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
-    rsync_files_from(&rlist, &format!("{}:.claude/memnir/", p), &format!("{}/", sm().display()));
+    let ps = peers();
+    if ps.is_empty() { eprintln!("memnir: no peers configured (~/.claude/memnir.conf)"); return; }
+    let dest = format!("{}/", sm().display());
+    for p in &ps {
+        let out = Command::new("ssh").args(SSH_ARGS).arg(p).arg(REMOTE_SHARED_LS).output();
+        let rlist = out.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+        rsync_files_from(&rlist, &format!("{}:.claude/memnir/", p), &dest);
+    }
     regen_index();
 }
-fn peer_drift() -> Option<usize> {
-    let p = peer();
-    if p.is_empty() { return None; }
+fn peer_drift_to(p: &str) -> Option<usize> {
     let list = shared_files().join("\n");
     if list.trim().is_empty() { return Some(0); }
     let mut child = Command::new("rsync")
@@ -282,6 +332,7 @@ struct Analysis {
     n: usize,
     shared: usize,
     types: BTreeMap<String, usize>,
+    origins: BTreeMap<String, usize>,
     oversized: Vec<String>,
     scope_flags: Vec<String>,
 }
@@ -310,8 +361,10 @@ fn analyze() -> Analysis {
     let isolated = mems.iter().filter(|m| !linked.contains(&m.file)).map(|m| m.file.clone()).collect();
     let idx_tok = fs::read_to_string(sm().join("MEMORY.md")).map(|s| s.chars().count() / 4).unwrap_or(0);
     let mut types = BTreeMap::new();
+    let mut origins = BTreeMap::new();
     for m in &mems {
         *types.entry(m.typ.clone()).or_insert(0) += 1;
+        *origins.entry(m.origin.clone()).or_insert(0) += 1;
     }
     let mut oversized: Vec<&Mem> = mems.iter().filter(|m| m.tok > OVERSIZE).collect();
     oversized.sort_by_key(|m| std::cmp::Reverse(m.tok));
@@ -327,6 +380,7 @@ fn analyze() -> Analysis {
         n: mems.len(),
         shared: mems.iter().filter(|m| m.shared).count(),
         types,
+        origins,
         oversized: oversized.iter().map(|m| m.file.clone()).collect(),
         scope_flags,
         mems,
@@ -337,20 +391,22 @@ fn analyze() -> Analysis {
 // ---------- commands ----------
 fn cmd_status() {
     let a = analyze();
+    let ps = peers();
     println!("Memnir store: {}", sm().display());
     println!("memories: {}  (shared:{}  local:{})", a.n, a.shared, a.n - a.shared);
-    let p = peer();
-    println!("peer: {}", if p.is_empty() { "(unset — see ~/.claude/memnir.conf)".into() } else { p });
+    println!("origins:  {}", fmt_counts(&a.origins));
+    println!("peers:    {}", if ps.is_empty() { "(none — see ~/.claude/memnir.conf)".to_string() } else { ps.join(", ") });
 }
 fn cmd_list() {
     let mems = load();
     println!("SHARED (sync ข้ามเครื่อง):");
-    for m in mems.iter().filter(|m| m.shared) { println!("  {}", m.file); }
+    for m in mems.iter().filter(|m| m.shared) { println!("  [{}]  {}", m.origin, m.file); }
     println!("LOCAL (เครื่องนี้เท่านั้น):");
     for m in mems.iter().filter(|m| !m.shared) { println!("  {}", m.file); }
 }
 fn cmd_sync() {
-    println!("host={}  peer={}", hostname(), peer());
+    let ps = peers();
+    println!("host={}  peers={}", hostname(), if ps.is_empty() { "(none)".to_string() } else { ps.join(",") });
     push();
     pull();
     let a = analyze();
@@ -361,7 +417,7 @@ fn cmd_scope(id: &str, shared: bool) {
         Ok(pushed) => {
             let name = resolve(id).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| id.to_string());
             println!("✓ {} → scope:{}", name, if shared { "shared" } else { "local" });
-            if pushed { println!("  pushed to peer"); }
+            if pushed { println!("  pushed to peers"); }
         }
         Err(e) => { eprintln!("{}", e); std::process::exit(1); }
     }
@@ -387,28 +443,29 @@ fn cmd_link(auto: bool) {
 }
 fn cmd_doctor(check: bool) {
     let a = analyze();
-    let drift = peer_drift();
+    let health: Vec<(String, Option<usize>)> = peers().iter().map(|p| (p.clone(), peer_drift_to(p))).collect();
+    let reachable = health.iter().filter(|(_, d)| d.is_some()).count();
+    let drift_sum: usize = health.iter().filter_map(|(_, d)| *d).sum();
     if check {
         let mut w = Vec::new();
         if a.idx_tok > IDX_WARN { w.push(format!("index {}k tok always-on", (a.idx_tok + 500) / 1000)); }
         if a.broken > 0 { w.push(format!("{} broken [[links]]", a.broken)); }
-        if let Some(d) = drift { if d > 0 { w.push(format!("sync drift {} files", d)); } }
+        if drift_sum > 0 { w.push(format!("sync drift {} files", drift_sum)); }
         if !w.is_empty() { println!("⚠ memnir: {}  → run `memnir doctor`", w.join("; ")); }
         return;
     }
     let dot = |v: usize, t: usize| if v > t { "🔴" } else if v * 10 > t * 6 { "🟠" } else { "🟢" };
-    let p = peer();
-    let pname = if p.is_empty() { "(unset)".to_string() } else { p };
-    let peer_ok = if drift.is_some() { "✓" } else { "unreachable" };
-    let drift_s = drift.map(|d| d.to_string()).unwrap_or_else(|| "?".into());
-    let mut types: Vec<_> = a.types.iter().collect();
-    types.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
-    let types = types.iter().map(|(k, c)| format!("{}:{}", k, c)).collect::<Vec<_>>().join(" ");
     println!("MEMNIR HEALTH ───────────────────────────────── {}", hostname());
-    println!("inventory   {} memories   {}", a.n, types);
+    println!("inventory   {} memories   {}", a.n, fmt_counts(&a.types));
     println!("scope       shared:{}   local:{}", a.shared, a.n - a.shared);
+    println!("origins     {}", fmt_counts(&a.origins));
     println!("tokens      index ~{:.1}k/session {}   pool ~{}k", a.idx_tok as f64 / 1000.0, dot(a.idx_tok, IDX_WARN), a.pool_tok / 1000);
-    println!("sync        peer {} {}   drift: {} files", pname, peer_ok, drift_s);
+    println!("peers       {} (reachable {})   drift: {} files", health.len(), reachable, drift_sum);
+    if health.len() > 1 || reachable < health.len() {
+        for (p, d) in &health {
+            println!("            {} {}", if d.is_some() { "✓" } else { "✗" }, p);
+        }
+    }
     println!();
     println!("⚠ ISSUES & ACTIONS");
     if a.idx_tok > IDX_WARN {
@@ -447,17 +504,18 @@ fn dash_html(serve: bool, token: &str) -> String {
             "{{\"id\":{},\"label\":{},\"group\":{},\"value\":{},\"shape\":\"dot\",\"color\":{{\"background\":{},\"border\":{}}},\"title\":{}}}",
             jstr(&m.file), jstr(&label), jstr(&m.typ), m.tok, jstr(color(&m.typ)),
             jstr(if m.shared { "#0f766e" } else { "#e11d48" }),
-            jstr(&format!("{}  ~{}tok  {}", m.file, m.tok, if m.shared { "shared" } else { "local" }))
+            jstr(&format!("{}  ~{}tok  {} · from {}", m.file, m.tok, if m.shared { "shared" } else { "local" }, m.origin))
         )
     }).collect::<Vec<_>>().join(",");
     let edges = a.edges.iter().map(|(s, t)| format!("{{\"from\":{},\"to\":{}}}", jstr(s), jstr(t))).collect::<Vec<_>>().join(",");
     let types = a.types.iter().map(|(k, v)| format!("{}:{}", jstr(k), v)).collect::<Vec<_>>().join(",");
+    let origins = a.origins.iter().map(|(k, v)| format!("{}:{}", jstr(k), v)).collect::<Vec<_>>().join(",");
     let mut top: Vec<&Mem> = a.mems.iter().collect();
     top.sort_by_key(|m| std::cmp::Reverse(m.tok));
     let top_json = top.iter().take(TOP_N).map(|m| format!("[{},{}]", jstr(&m.file), m.tok)).collect::<Vec<_>>().join(",");
     let data = format!(
-        "{{\"nodes\":[{}],\"edges\":[{}],\"types\":{{{}}},\"shared\":{},\"n\":{},\"idx_tok\":{},\"pool_tok\":{},\"broken\":{},\"isolated\":{},\"top\":[{}],\"serve\":{},\"token\":{}}}",
-        nodes, edges, types, a.shared, a.n, a.idx_tok, a.pool_tok, a.broken, a.isolated.len(), top_json, serve, jstr(token)
+        "{{\"nodes\":[{}],\"edges\":[{}],\"types\":{{{}}},\"origins\":{{{}}},\"shared\":{},\"n\":{},\"idx_tok\":{},\"pool_tok\":{},\"broken\":{},\"isolated\":{},\"top\":[{}],\"serve\":{},\"token\":{}}}",
+        nodes, edges, types, origins, a.shared, a.n, a.idx_tok, a.pool_tok, a.broken, a.isolated.len(), top_json, serve, jstr(token)
     );
     HTML.replace("/*DATA*/", &data)
 }
@@ -535,31 +593,31 @@ USAGE
   memnir <command> [args]
 
 SYNC
-  sync                push + pull shared memories with the peer, then rebuild the index
-  push               send shared memories to the peer (one way)
-  pull               fetch shared memories from the peer (one way)
+  sync                push + pull shared memories with all peers, then rebuild the index
+  push               send shared memories to every peer (one way)
+  pull               fetch shared memories from every peer (one way)
   start              autolink current project + sync   (run by the SessionStart hook)
 
 SCOPE                only `scope: shared` memories cross machines; default is local
-  share <id>         mark a memory shared and push it to the peer
+  share <id>         mark a memory shared and push it to the peers
   local <id>         remove the tag — keep it on this machine only
-  list               list shared vs local memories
+  list               list shared vs local memories (shared show their origin machine)
 
 PROJECT
   link               symlink the current project's memory dir into the pool
 
 INSIGHT
-  doctor [--check]   health report: tokens, broken links, oversized, suggested actions
-                     (--check prints only when something needs attention; for hooks)
-  dash               write a static dashboard.html (knowledge graph + token viz)
+  doctor [--check]   health: tokens, broken links, oversized, origins, peers, actions
+  dash               write a static dashboard.html (knowledge graph + token + origins)
   serve [--port N]   interactive dashboard on 127.0.0.1 (click node = toggle, sync button)
 
 INFO
-  status             store path, memory counts (shared:local), peer
+  status             store path, memory counts, origins, peers
   help               show this help
 
 CONFIG
-  peer               read from ~/.claude/memnir.conf  (or env MEMNIR_PEER)  e.g. user@tailscale-host
+  peers              ~/.claude/memnir.conf — one `user@tailscale-host` per line (mesh),
+                     or env MEMNIR_PEER (comma/space separated)
 
 EXAMPLES
   memnir share project_firestore_envs
@@ -609,8 +667,8 @@ mod tests {
     fn fm_field_reads_values_and_indent() {
         let fm = "name: foo\n  type: project\ndescription: hi there: ok";
         assert_eq!(fm_field(fm, "name").as_deref(), Some("foo"));
-        assert_eq!(fm_field(fm, "type").as_deref(), Some("project")); // indented
-        assert_eq!(fm_field(fm, "description").as_deref(), Some("hi there: ok")); // value may contain ':'
+        assert_eq!(fm_field(fm, "type").as_deref(), Some("project"));
+        assert_eq!(fm_field(fm, "description").as_deref(), Some("hi there: ok"));
         assert_eq!(fm_field(fm, "missing"), None);
     }
 
@@ -641,7 +699,6 @@ mod tests {
         let out = set_scope_in(src, true).unwrap();
         assert!(out.contains("  scope: shared"), "{out}");
         assert!(out.contains("body"));
-        // setting shared twice keeps exactly one scope line
         let twice = set_scope_in(&out, true).unwrap();
         assert_eq!(twice.matches("scope: shared").count(), 1);
     }
@@ -657,6 +714,17 @@ mod tests {
     #[test]
     fn set_scope_none_without_frontmatter() {
         assert!(set_scope_in("plain text", true).is_none());
+    }
+
+    #[test]
+    fn set_origin_adds_once() {
+        let src = "---\nname: x\nmetadata:\n  type: project\n  scope: shared\n---\nbody";
+        let out = set_origin_in(src, "MacBook").unwrap();
+        assert!(out.contains("  origin: MacBook"), "{out}");
+        // ordering: origin goes after scope
+        assert!(out.find("scope: shared").unwrap() < out.find("origin: MacBook").unwrap());
+        // already stamped → None
+        assert!(set_origin_in(&out, "Other").is_none());
     }
 
     #[test]
@@ -678,5 +746,13 @@ mod tests {
     fn jstr_escapes_specials() {
         assert_eq!(jstr("a\"b\\c\n"), "\"a\\\"b\\\\c\\n\"");
         assert_eq!(jstr("plain"), "\"plain\"");
+    }
+
+    #[test]
+    fn fmt_counts_sorts_desc() {
+        let mut m = BTreeMap::new();
+        m.insert("a".to_string(), 2);
+        m.insert("b".to_string(), 5);
+        assert_eq!(fmt_counts(&m), "b:5  a:2");
     }
 }
