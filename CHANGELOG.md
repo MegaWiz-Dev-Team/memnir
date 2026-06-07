@@ -2,6 +2,18 @@
 
 All notable changes to Memnir are documented here. Format follows [Keep a Changelog](https://keepachangelog.com); versioning is [SemVer](https://semver.org).
 
+## [0.2.0] — 2026-06-06
+
+### Added
+- **`compact-index` (Tier-0 split)** — caps the always-on `MEMORY.md` token footprint. Keeps only Tier-0 types (default `user,feedback`; configurable) in the auto-loaded index and spills the full catalog to `MEMORY.full.md` — not auto-loaded, but still on disk and fully searchable (`search` scans the pool, not the index). Persisted via a `.index_compact` marker so `sync`/`pull`/`share` keep regenerating the compact form. Reversible with `--off`; no data loss (the index is always regenerated from the memory files). `MEMORY.full.md` is local-only (never synced).
+- **`fix-links [--apply]`** — repairs broken `[[links]]` that have exactly one unambiguous normalized-substring target. Dry-run by default; conservative — typos and deliberate forward-references are reported but left untouched. Makes the `doctor` "→ memnir fix-links" action a real command.
+- `autolink` documented in `help` and the README command table (already existed in dispatch).
+
+### Changed
+- `doctor`'s index action now points at the real `memnir compact-index` command (was an aspirational label).
+- `regen_index` is tier-aware and preserves hand-curated lines from both `MEMORY.md` and `MEMORY.full.md`; the loader now excludes all `MEMORY*.md` files from the pool.
+- 4 new unit tests (18 total), clippy clean.
+
 ## [0.1.1] — 2026-06-05
 
 ### Added
@@ -26,5 +38,6 @@ Initial public release. A single Rust binary (pure std, no external crates) that
 - **Per-machine peer config** — read from `~/.claude/memnir.conf` or env `MEMNIR_PEER`; no host data baked into the binary.
 - `install.sh` bootstrapper, English + Thai READMEs, MIT license.
 
+[0.2.0]: https://github.com/MegaWiz-Dev-Team/memnir/releases/tag/v0.2.0
 [0.1.1]: https://github.com/MegaWiz-Dev-Team/memnir/releases/tag/v0.1.1
 [0.1.0]: https://github.com/MegaWiz-Dev-Team/memnir/releases/tag/v0.1.0

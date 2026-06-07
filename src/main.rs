@@ -17,6 +17,7 @@ const SSH_ARGS: [&str; 6] = ["-o", "ConnectTimeout=8", "-o", "BatchMode=yes", "-
 const REMOTE_SHARED_LS: &str = "cd ~/.claude/memnir && grep -lE '^[[:space:]]*scope:[[:space:]]*shared[[:space:]]*$' -- *.md 2>/dev/null";
 const IDX_WARN: usize = 12_000; // always-on index tokens before it's flagged
 const OVERSIZE: usize = 2_000; // a single memory above this is flagged for splitting
+const TIER0_TYPES: [&str; 2] = ["user", "feedback"]; // default always-on tier for compact-index
 const TOP_N: usize = 12; // dashboard "top token footprint" rows
 const LABEL_LEN: usize = 22; // graph node label truncation
 const HTML: &str = include_str!("dashboard.template.html");
@@ -82,6 +83,20 @@ fn extract_links(t: &str) -> Vec<String> {
 }
 fn norm(s: &str) -> String {
     s.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect()
+}
+// Best canonical target for a broken `[[link]]`: a normalized substring match
+// (≥5-char link, ≥4-char key, both directions) that hits exactly ONE memory.
+// `targets` = (normalized-key, canonical-name). None = leave it alone (ambiguous
+// or a deliberate forward-reference). Pure → unit-tested.
+fn resolve_broken_link(link: &str, targets: &[(String, String)]) -> Option<String> {
+    let nl = norm(link);
+    if nl.len() < 5 { return None; }
+    let mut hits: Vec<&String> = targets.iter()
+        .filter(|(k, _)| k.len() >= 4 && (k.contains(&nl) || nl.contains(k.as_str())))
+        .map(|(_, name)| name).collect();
+    hits.sort();
+    hits.dedup();
+    if hits.len() == 1 && hits[0].as_str() != link { Some(hits[0].clone()) } else { None }
 }
 // Insert a frontmatter line after the last `type:`/`scope:` line (matching its
 // indent), else append. Skips if `key:` already present. Pure → unit-tested.
@@ -193,7 +208,7 @@ fn md_files() -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = fs::read_dir(sm()).map(|rd| {
         rd.filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| p.extension().is_some_and(|x| x == "md")
-                && p.file_name().is_some_and(|n| n != "MEMORY.md"))
+                && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| !n.starts_with("MEMORY")))
             .collect()
     }).unwrap_or_default();
     v.sort();
@@ -252,25 +267,64 @@ fn stamp_origins() {
 }
 
 // ---------- index ----------
+// Compact mode: a `.index_compact` marker means MEMORY.md (the always-on index)
+// holds only Tier-0 memories; the full catalog moves to MEMORY.full.md, which is
+// not auto-loaded but still on disk + fully searchable (`search` scans the pool,
+// not the index). Marker body = comma/space list of Tier-0 types; empty = default.
+fn compact_marker() -> PathBuf {
+    sm().join(".index_compact")
+}
+fn compact_on() -> bool {
+    compact_marker().exists()
+}
+fn tier0_types() -> Vec<String> {
+    fs::read_to_string(compact_marker()).ok()
+        .map(|s| s.split([',', ' ', '\n', '\t']).map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect::<Vec<_>>())
+        .filter(|v: &Vec<String>| !v.is_empty())
+        .unwrap_or_else(|| TIER0_TYPES.iter().map(|s| s.to_string()).collect())
+}
+// Partition (type, line) entries into (tier-0, rest) by type membership. Pure → unit-tested.
+fn partition_tier0<'a>(items: &'a [(String, String)], tier0: &[String]) -> (Vec<&'a str>, Vec<&'a str>) {
+    let (mut t0, mut rest) = (Vec::new(), Vec::new());
+    for (typ, line) in items {
+        if tier0.iter().any(|t| t == typ) { t0.push(line.as_str()); } else { rest.push(line.as_str()); }
+    }
+    (t0, rest)
+}
 fn regen_index() {
     let idx_path = sm().join("MEMORY.md");
+    let full_path = sm().join("MEMORY.full.md");
+    // Preserve any hand-curated lines (from either file) keyed by target file.
     let mut keep: HashMap<String, String> = HashMap::new();
-    if let Ok(cur) = fs::read_to_string(&idx_path) {
-        for line in cur.lines() {
-            if let Some(file) = index_file_of(line) {
-                keep.insert(file.to_string(), line.to_string());
+    for p in [&idx_path, &full_path] {
+        if let Ok(cur) = fs::read_to_string(p) {
+            for line in cur.lines() {
+                if let Some(file) = index_file_of(line) {
+                    keep.entry(file.to_string()).or_insert_with(|| line.to_string());
+                }
             }
         }
     }
-    let mut out = String::from("# Memory Index\n\n");
-    for m in load() {
-        match keep.get(&m.file) {
-            Some(l) => out.push_str(l),
-            None => out.push_str(&format!("- [{}]({}) — {}", m.file.trim_end_matches(".md").replace('_', " "), m.file, m.desc)),
-        }
-        out.push('\n');
+    let mems = load();
+    let line_of = |m: &Mem| -> String {
+        keep.get(&m.file).cloned().unwrap_or_else(||
+            format!("- [{}]({}) — {}", m.file.trim_end_matches(".md").replace('_', " "), m.file, m.desc))
+    };
+    if compact_on() {
+        let tier0 = tier0_types();
+        let items: Vec<(String, String)> = mems.iter().map(|m| (m.typ.clone(), line_of(m))).collect();
+        let (t0, _) = partition_tier0(&items, &tier0);
+        let head = format!(
+            "# Memory Index (Tier-0)\n\n> Compacted: only {} memories are always-on. Full catalog in [MEMORY.full.md](MEMORY.full.md); every memory stays searchable via `memnir search`.\n\n",
+            tier0.join("/"));
+        let _ = fs::write(&idx_path, format!("{}{}\n", head, t0.join("\n")));
+        let full: Vec<String> = items.iter().map(|(_, l)| l.clone()).collect();
+        let _ = fs::write(&full_path, format!("# Memory Index — full catalog\n\n{}\n", full.join("\n")));
+    } else {
+        let body: Vec<String> = mems.iter().map(&line_of).collect();
+        let _ = fs::write(&idx_path, format!("# Memory Index\n\n{}\n", body.join("\n")));
+        let _ = fs::remove_file(&full_path); // no stray catalog when not compacted
     }
-    let _ = fs::write(idx_path, out);
 }
 fn set_scope(file: &Path, shared: bool) {
     let Ok(content) = fs::read_to_string(file) else { return };
@@ -485,7 +539,8 @@ fn cmd_doctor(check: bool) {
     println!();
     println!("⚠ ISSUES & ACTIONS");
     if a.idx_tok > IDX_WARN {
-        println!(" 🔴 index {}k always-on        → compact-index (Tier-0 split)", (a.idx_tok + 500) / 1000);
+        let hint = if compact_on() { "widen local / prune Tier-0" } else { "Tier-0 split" };
+        println!(" 🔴 index {}k always-on        → memnir compact-index   ({})", (a.idx_tok + 500) / 1000, hint);
     }
     if a.broken > 0 {
         println!(" 🟠 {} broken [[links]]          → memnir fix-links", a.broken);
@@ -503,6 +558,97 @@ fn cmd_doctor(check: bool) {
     }
     println!();
     println!("→ visualize:  memnir dash");
+}
+fn idx_tok_now() -> usize {
+    fs::read_to_string(sm().join("MEMORY.md")).map(|s| s.chars().count() / 4).unwrap_or(0)
+}
+// compact-index: shrink the always-on MEMORY.md to a Tier-0 subset (by type),
+// spilling the full catalog to MEMORY.full.md. `on=false` (--off) restores it.
+fn cmd_compact_index(on: bool, types: Vec<String>) {
+    let before = idx_tok_now();
+    if on {
+        let body = if types.is_empty() { TIER0_TYPES.join(",") } else { types.join(",") };
+        let _ = fs::write(compact_marker(), format!("{}\n", body));
+    } else {
+        let _ = fs::remove_file(compact_marker());
+    }
+    regen_index();
+    let after = idx_tok_now();
+    if on {
+        let tier0 = tier0_types();
+        let mems = load();
+        let kept = mems.iter().filter(|m| tier0.contains(&m.typ)).count();
+        println!("✓ compact-index ON — Tier-0 = {}", tier0.join("/"));
+        println!("  MEMORY.md       ~{:.1}k → ~{:.1}k tok/session ({} of {} memories)",
+            before as f64 / 1000.0, after as f64 / 1000.0, kept, mems.len());
+        println!("  MEMORY.full.md  full catalog — on-demand, still searchable via `memnir search`");
+        if after > IDX_WARN { println!("  ⚠ still above {}k — widen what's local or prune Tier-0 types", IDX_WARN / 1000); }
+    } else {
+        println!("✓ compact-index OFF — MEMORY.md restored to full catalog (~{:.1}k tok/session)", after as f64 / 1000.0);
+    }
+}
+// fix-links: repair broken [[links]] that have a single unambiguous target by
+// normalized match. Dry-run by default; --apply rewrites the source files.
+fn cmd_fix_links(apply: bool) {
+    let mems = load();
+    let mut resolvable: HashSet<String> = HashSet::new(); // norm keys that already match
+    let mut targets: Vec<(String, String)> = Vec::new(); // (norm key, canonical name)
+    for m in &mems {
+        for key in [norm(m.file.trim_end_matches(".md")), norm(&m.name)] {
+            resolvable.insert(key.clone());
+            targets.push((key, m.name.clone()));
+        }
+    }
+    let mut fixable: Vec<(String, String, String)> = Vec::new(); // (file, old, new)
+    let mut unresolved: Vec<(String, String)> = Vec::new();
+    for m in &mems {
+        for l in &m.links {
+            if resolvable.contains(&norm(l)) { continue; }
+            match resolve_broken_link(l, &targets) {
+                Some(new) => fixable.push((m.file.clone(), l.clone(), new)),
+                None => unresolved.push((m.file.clone(), l.clone())),
+            }
+        }
+    }
+    if fixable.is_empty() && unresolved.is_empty() {
+        println!("✓ no broken [[links]] — nothing to fix");
+        return;
+    }
+    if !fixable.is_empty() {
+        println!("{} fixable [[link]]{}{}:", fixable.len(), if fixable.len() == 1 { "" } else { "s" },
+            if apply { " (applying)" } else { " (dry-run — pass --apply)" });
+        for (file, old, new) in &fixable {
+            println!("  {}:  [[{}]] → [[{}]]", file.trim_end_matches(".md"), old, new);
+        }
+    }
+    if apply {
+        let mut changed = 0usize;
+        let mut by_file: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for (file, old, new) in &fixable {
+            by_file.entry(file.clone()).or_default().push((old.clone(), new.clone()));
+        }
+        for (file, repls) in &by_file {
+            let p = sm().join(file);
+            let Ok(mut content) = fs::read_to_string(&p) else { continue };
+            for (old, new) in repls {
+                let from = format!("[[{}]]", old);
+                if content.contains(&from) {
+                    content = content.replace(&from, &format!("[[{}]]", new));
+                    changed += 1;
+                }
+            }
+            let _ = fs::write(&p, content);
+        }
+        regen_index();
+        println!("✓ rewrote {} link{}", changed, if changed == 1 { "" } else { "s" });
+    }
+    if !unresolved.is_empty() {
+        println!("{} unresolved (no unique match — likely forward-references, left as-is):", unresolved.len());
+        for (file, old) in unresolved.iter().take(20) {
+            println!("  {}:  [[{}]]", file.trim_end_matches(".md"), old);
+        }
+        if unresolved.len() > 20 { println!("  … +{} more", unresolved.len() - 20); }
+    }
 }
 
 // ---------- search ----------
@@ -694,6 +840,11 @@ INSIGHT
   dash               write a static dashboard.html (knowledge graph + token + origins)
   serve [--port N]   interactive dashboard on 127.0.0.1 (click node = toggle, sync button)
 
+TOKENS
+  compact-index [types] [--off]   cap the always-on index: keep only Tier-0 types in
+                     MEMORY.md (default user,feedback), spill the rest to MEMORY.full.md
+  fix-links [--apply]             repair broken [[links]] with one unambiguous target
+
 INFO
   status             store path, memory counts, origins, peers
   help               show this help
@@ -736,6 +887,13 @@ fn main() {
             cmd_related(id, depth);
         }
         "doctor" => cmd_doctor(args.iter().any(|a| a == "--check")),
+        "compact-index" => {
+            let off = args.iter().any(|a| a == "--off");
+            let types: Vec<String> = args.iter().skip(2).filter(|s| !s.starts_with("--"))
+                .flat_map(|s| s.split(',')).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            cmd_compact_index(!off, types);
+        }
+        "fix-links" => cmd_fix_links(args.iter().any(|a| a == "--apply")),
         "dash" => cmd_dash(),
         "serve" => {
             let port = args.iter().position(|a| a == "--port").and_then(|i| args.get(i + 1))
@@ -862,5 +1020,51 @@ mod tests {
         m.insert("a".to_string(), 2);
         m.insert("b".to_string(), 5);
         assert_eq!(fmt_counts(&m), "b:5  a:2");
+    }
+
+    #[test]
+    fn partition_tier0_splits_by_type() {
+        let items = vec![
+            ("user".to_string(), "U".to_string()),
+            ("project".to_string(), "P".to_string()),
+            ("feedback".to_string(), "F".to_string()),
+            ("reference".to_string(), "R".to_string()),
+        ];
+        let tier0 = vec!["user".to_string(), "feedback".to_string()];
+        let (t0, rest) = partition_tier0(&items, &tier0);
+        assert_eq!(t0, vec!["U", "F"]);
+        assert_eq!(rest, vec!["P", "R"]);
+        // empty tier0 → everything spills to rest
+        let (none, all) = partition_tier0(&items, &[]);
+        assert!(none.is_empty());
+        assert_eq!(all.len(), 4);
+    }
+
+    #[test]
+    fn resolve_broken_link_unique_match_only() {
+        let targets: Vec<(String, String)> = [("primekg-graph-agent", "primekg-graph-agent"), ("iris-fhir-r5-plan", "iris-fhir-r5-plan")]
+            .iter().map(|(f, n)| (norm(f), n.to_string())).collect();
+        // unique substring hit → resolves to canonical name
+        assert_eq!(resolve_broken_link("primekg graph", &targets).as_deref(), Some("primekg-graph-agent"));
+        // too short (<5 normalized chars) → left alone
+        assert_eq!(resolve_broken_link("iris", &targets), None);
+        // no match → forward-reference, left alone
+        assert_eq!(resolve_broken_link("totally-new-note", &targets), None);
+    }
+
+    #[test]
+    fn resolve_broken_link_ambiguous_is_skipped() {
+        let targets: Vec<(String, String)> = [("eir-cds-cardio", "eir-cds-cardio"), ("eir-cds-router", "eir-cds-router")]
+            .iter().map(|(f, n)| (norm(f), n.to_string())).collect();
+        // "eircds" is a substring of both → ambiguous → None
+        assert_eq!(resolve_broken_link("eir-cds", &targets), None);
+    }
+
+    #[test]
+    fn tier0_types_parses_marker_body() {
+        // exercises the same split logic the marker file uses
+        let parsed: Vec<String> = "user, feedback project\n".split([',', ' ', '\n', '\t'])
+            .map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect();
+        assert_eq!(parsed, vec!["user", "feedback", "project"]);
     }
 }

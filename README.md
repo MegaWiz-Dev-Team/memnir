@@ -96,10 +96,12 @@ tokens      index ~15.0k/session 🔴   pool ~195k
 peers       2 (reachable 2)   drift: 0 files
 
 ⚠ ISSUES & ACTIONS
- 🔴 index 15k always-on        → compact-index (Tier-0 split)
+ 🔴 index 15k always-on        → memnir compact-index   (Tier-0 split)
  🟠 21 broken [[links]]          → memnir fix-links
  🟡 66 isolated memories       → link them (graph: memnir dash)
 ```
+
+Every action above is a real command — run it to clear the flag. See [Token footprint](#token-footprint-) below.
 
 ### Command reference
 
@@ -117,6 +119,9 @@ peers       2 (reachable 2)   drift: 0 files
 | `memnir start` | autolink current project + sync (run by the SessionStart hook) |
 | `memnir link` | manually symlink the current project into the pool |
 | `memnir doctor [--check]` | health report + actions (`--check` = quiet unless there's an issue; for hooks) |
+| `memnir compact-index [types] [--off]` | cap the always-on index — keep only Tier-0 types in `MEMORY.md`, spill the rest to `MEMORY.full.md` (see [Token footprint](#token-footprint-)) |
+| `memnir fix-links [--apply]` | repair broken `[[links]]` that have one unambiguous target (dry-run unless `--apply`) |
+| `memnir autolink` | symlink the current project into the pool, quietly (no output if already linked; used by the hook) |
 | `memnir dash` | write a static `dashboard.html` (knowledge graph + token visualization) |
 | `memnir serve [--port N]` | **interactive** dashboard on `127.0.0.1` — click a node to toggle shared/local, buttons to sync |
 
@@ -160,6 +165,37 @@ metadata:
 - Toggle anytime: `memnir share <id>` / `memnir local <id>`.
 
 Sync is filtered with `rsync --files-from=<list of scope:shared files>` — local files are never transmitted.
+
+## Token footprint 🪙
+
+Only **one thing is always-on**: `MEMORY.md`, the index — Claude Code loads it into context every session. Everything else (the memory bodies, the whole pool) is **on-demand**: `memnir search` scans the files directly, so the full catalog costs **zero tokens** until you actually query it.
+
+`MEMORY.md` carries one line per memory, so it grows with the pool — at a few hundred memories it can dominate your always-on context. `memnir doctor` flags it 🔴 past ~12k tokens. Two commands keep it lean:
+
+### `memnir compact-index` — Tier-0 split
+
+Splits the index into a small always-on tier and an on-demand catalog:
+
+```bash
+memnir compact-index            # MEMORY.md = only user + feedback memories
+memnir compact-index user feedback project   # custom Tier-0 types
+memnir compact-index --off      # restore the full index
+```
+
+- `MEMORY.md` keeps only **Tier-0** memories (default `user,feedback` — the ones worth carrying every session).
+- The full catalog moves to `MEMORY.full.md` — **not auto-loaded**, but still on disk and **fully searchable** (`search` works on the pool, not the index, so nothing becomes unreachable).
+- Reversible any time with `--off`; the index is always regenerated from the actual memory files, so no data is ever lost. `MEMORY.full.md` is local-only (never synced, like `MEMORY.md`).
+
+The active Tier-0 is remembered in a `.index_compact` marker, so `sync`/`pull`/`share` keep regenerating the compact form instead of re-expanding it.
+
+### `memnir fix-links` — repair broken `[[links]]`
+
+```bash
+memnir fix-links            # dry-run: list broken links + proposed fixes
+memnir fix-links --apply    # rewrite the unambiguous ones
+```
+
+A `[[link]]` is "broken" when no memory matches it. `fix-links` only rewrites a link when exactly **one** memory is an unambiguous normalized-substring match — typos and genuine forward-references (a `[[name]]` for a memory you haven't written yet) are listed but **left untouched**.
 
 ## Sync design
 
